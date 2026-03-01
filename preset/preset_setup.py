@@ -82,8 +82,8 @@ def import_seed_accounts(cfg: dict, seed_dir: Path) -> tuple[int, int]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Friend one-click setup")
-    parser.add_argument("--profile", required=True, help="friend-profile.yaml path")
+    parser = argparse.ArgumentParser(description="Preset one-click setup")
+    parser.add_argument("--profile", required=True, help="preset-profile.yaml path")
     args = parser.parse_args()
 
     profile_path = Path(args.profile)
@@ -99,13 +99,13 @@ def main() -> int:
     cfg = apply_profile(cfg, profile)
     save_yaml(cfg_path, cfg)
 
-    seed_dir = profile.get("seed_accounts_dir", "./friend/seed_accounts/")
+    seed_dir = profile.get("seed_accounts_dir", "./preset/seed_accounts/")
     seed_path = Path(seed_dir)
     if not seed_path.is_absolute():
         seed_path = (ROOT / seed_path).resolve()
     total, ok = import_seed_accounts(cfg, seed_path)
 
-    print("=== Friend Setup Summary ===")
+    print("=== Preset Setup Summary ===")
     print(f"profile: {profile_path}")
     print(f"domains: {cfg.get('mail', {}).get('domains', [])}")
     print("forced register.daily_limit_per_domain: 50")

@@ -144,9 +144,9 @@ def cmd_setup_proxy(_: argparse.Namespace) -> int:
     return run_sh(ROOT / "scripts" / "setup_mihomo.sh")
 
 
-def cmd_friend_setup(args: argparse.Namespace) -> int:
-    profile = args.profile or str(ROOT / "friend" / "friend-profile.yaml")
-    return run_py(ROOT / "friend" / "friend_setup.py", ["--profile", profile], cwd=ROOT)
+def cmd_preset_setup(args: argparse.Namespace) -> int:
+    profile = args.profile or str(ROOT / "preset" / "preset-profile.yaml")
+    return run_py(ROOT / "preset" / "preset_setup.py", ["--profile", profile], cwd=ROOT)
 
 
 def cmd_start_scheduler(_: argparse.Namespace) -> int:
@@ -173,9 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup-cf").set_defaults(func=cmd_setup_cf)
     sub.add_parser("install-cpa").set_defaults(func=cmd_install_cpa)
     sub.add_parser("setup-proxy").set_defaults(func=cmd_setup_proxy)
-    f = sub.add_parser("friend-setup")
-    f.add_argument("--profile", help="friend-profile.yaml 路径")
-    f.set_defaults(func=cmd_friend_setup)
+    f = sub.add_parser("preset-setup")
+    f.add_argument("--profile", help="预设配置 profile.yaml 路径")
+    f.set_defaults(func=cmd_preset_setup)
     sub.add_parser("start-scheduler").set_defaults(func=cmd_start_scheduler)
     return p
 
