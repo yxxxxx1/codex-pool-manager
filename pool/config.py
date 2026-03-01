@@ -17,7 +17,9 @@ def _load() -> dict:
 _CFG = _load()
 _ROOT = _project_root()
 
-CPA_AUTHS_DIR = _CFG.get("cpa", {}).get("auths_dir", "./cpa/runtime/auths")
+CPA_AUTHS_DIR = os.path.expanduser(
+    _CFG.get("cpa", {}).get("auths_dir", "~/cliproxyapi_runtime/auths")
+)
 RESERVOIR_DB = os.path.join(_ROOT, "data", "reservoir.db")
 POOL_MAX = _CFG.get("pool", {}).get("max", 388)
 POOL_MIN = _CFG.get("pool", {}).get("min", 350)

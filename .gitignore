@@ -15,3 +15,4 @@ friend/seed_accounts/*.json
 friend/seed_accounts/*.json
 friend/*.yaml
 !friend/friend-profile.example.yaml
+scripts/cpa_storm_guard.env

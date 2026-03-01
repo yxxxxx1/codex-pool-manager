@@ -316,6 +316,45 @@ clean / check-quota / restore-quota
 
 ---
 
+## Storm Guard（CPA 写风暴防护）
+
+CPA 在 WSL2 下依赖 inotify 监听 auth 文件变化。若 auth-dir 位于 DrvFS（`/mnt/d/` 等 Windows 挂载路径），inotify 会产生大量冗余事件，导致 auth WRITE 风暴，CPA 尾延迟显著升高（p99 可达 54s+）。
+
+**解决方案：**
+1. `config.yaml` 中 `cpa.auths_dir` 设为 WSL 本地路径（`~/cliproxyapi_runtime/auths`，默认值已设好）
+2. 部署 storm guard 作为兜底防护：
+
+```bash
+# 复制并填写 env 文件
+cp scripts/cpa_storm_guard.env.example scripts/cpa_storm_guard.env
+nano scripts/cpa_storm_guard.env
+
+# 安装为 systemd 用户服务
+mkdir -p ~/.config/systemd/user/
+cat > ~/.config/systemd/user/cpa-storm-guard.service << 'EOF'
+[Unit]
+Description=CPA Storm Guard
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/codex-pool-manager/scripts/cpa_storm_guard.env
+ExecStart=python3 %h/codex-pool-manager/scripts/cpa_storm_guard.py daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now cpa-storm-guard
+```
+
+## 单主机限制
+
+CLIProxyAPI 在单主机只支持运行一个实例。多节点扩容需要部署多台机器，每台各跑一个 CPA 实例。
+
 ## 工作流详解
 
 ### 注册阶段
