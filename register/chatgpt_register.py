@@ -28,6 +28,7 @@ def _load_config():
     config = {
         "total_accounts": 3,
         "mail_provider": "duckmail",          # duckmail | tempmail
+        "cf_worker_url": "",
         "duckmail_api_base": "https://api.duckmail.sbs",
         "duckmail_bearer": "",
         "tempmail_api_base": "https://temp-mail.com",
@@ -56,6 +57,7 @@ def _load_config():
 
     # 环境变量优先级更高
     config["mail_provider"] = os.environ.get("MAIL_PROVIDER", config["mail_provider"])
+    config["cf_worker_url"] = os.environ.get("CF_WORKER_URL", config["cf_worker_url"])
     config["duckmail_api_base"] = os.environ.get("DUCKMAIL_API_BASE", config["duckmail_api_base"])
     config["duckmail_bearer"] = os.environ.get("DUCKMAIL_BEARER", config["duckmail_bearer"])
     config["tempmail_api_base"] = os.environ.get("TEMPMAIL_API_BASE", config["tempmail_api_base"])
@@ -85,6 +87,7 @@ def _as_bool(value):
 
 _CONFIG = _load_config()
 MAIL_PROVIDER = _CONFIG.get("mail_provider", "duckmail").lower().strip()
+CF_WORKER_URL = (_CONFIG.get("cf_worker_url") or "").strip()
 DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
 DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
 TEMPMAIL_API_BASE = _CONFIG["tempmail_api_base"].rstrip("/")
@@ -102,7 +105,12 @@ AK_FILE = _CONFIG["ak_file"]
 RK_FILE = _CONFIG["rk_file"]
 TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 
-if MAIL_PROVIDER == "tempmail":
+if MAIL_PROVIDER == "cf_worker":
+    if not CF_WORKER_URL:
+        print("⚠️ 警告: 未设置 CF_WORKER_URL，请在 config.json 中设置或设置环境变量")
+        print("   文件: config.json -> cf_worker_url")
+        print("   环境变量: export CF_WORKER_URL='https://xxx.workers.dev'")
+elif MAIL_PROVIDER == "tempmail":
     if not TEMPMAIL_ADMIN_AUTH:
         print("⚠️ 警告: 未设置 TEMPMAIL_ADMIN_AUTH，请在 config.json 中设置或设置环境变量")
         print("   文件: config.json -> tempmail_admin_auth")
@@ -729,6 +737,19 @@ class ChatGPTRegister:
         # mail_token 复用 email，_fetch_emails_tempmail 用它作为 address 过滤参数
         return email, "", email
 
+    def create_temp_email_cf_worker(self):
+        """生成自有域名邮箱，mail_token 复用 email 供 Worker 拉取 OTP。"""
+        if not TEMPMAIL_DOMAIN:
+            raise Exception("TEMPMAIL_DOMAIN 未设置，无法使用 cf_worker")
+        if not CF_WORKER_URL:
+            raise Exception("CF_WORKER_URL 未设置，无法使用 cf_worker")
+
+        chars = string.ascii_lowercase + string.digits
+        length = random.randint(8, 13)
+        email_local = "".join(random.choice(chars) for _ in range(length))
+        email = f"{email_local}@{TEMPMAIL_DOMAIN}"
+        return email, "", email
+
     def _fetch_emails_tempmail(self, mail_token: str):
         """通过 admin API 按 address 过滤获取邮件列表，mail_token 即邮箱地址"""
         try:
@@ -760,6 +781,8 @@ class ChatGPTRegister:
 
     def create_temp_email(self):
         """根据 MAIL_PROVIDER 创建临时邮箱，返回 (email, password, mail_token)"""
+        if MAIL_PROVIDER == "cf_worker":
+            return self.create_temp_email_cf_worker()
         if MAIL_PROVIDER == "tempmail":
             return self.create_temp_email_tempmail()
         return self._create_temp_email_duckmail()
@@ -884,9 +907,43 @@ class ChatGPTRegister:
 
     def wait_for_verification_email(self, mail_token: str, timeout: int = 120):
         """等待并提取 OpenAI 验证码（根据 MAIL_PROVIDER 分发到对应实现）"""
+        if MAIL_PROVIDER == "cf_worker":
+            return self._wait_for_verification_email_cf_worker(mail_token, timeout)
         if MAIL_PROVIDER == "tempmail":
             return self._wait_for_verification_email_tempmail(mail_token, timeout)
         return self._wait_for_verification_email_duckmail(mail_token, timeout)
+
+    def _wait_for_verification_email_cf_worker(self, mail_token: str, timeout: int = 120):
+        """轮询 Cloudflare Worker 的 /get-otp 接口获取验证码。"""
+        self._print(f"[OTP] 等待验证码邮件 (cf_worker, 最多 {timeout}s)...")
+        start_time = time.time()
+        worker_base = CF_WORKER_URL.rstrip("/")
+
+        while time.time() - start_time < timeout:
+            try:
+                res = self.session.get(
+                    f"{worker_base}/get-otp",
+                    params={"email": mail_token},
+                    timeout=12,
+                    impersonate=self.impersonate,
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    otp = (data or {}).get("otp")
+                    if otp:
+                        otp = str(otp).strip()
+                        if re.fullmatch(r"\d{6}", otp):
+                            self._print(f"[OTP] 验证码: {otp}")
+                            return otp
+            except Exception:
+                pass
+
+            elapsed = int(time.time() - start_time)
+            self._print(f"[OTP] 等待中... ({elapsed}s/{timeout}s)")
+            time.sleep(3)
+
+        self._print(f"[OTP] 超时 ({timeout}s)")
+        return None
 
     def _wait_for_verification_email_duckmail(self, mail_token: str, timeout: int = 120):
         """等待并提取 OpenAI 验证码 (DuckMail)"""
@@ -1625,31 +1682,53 @@ class ChatGPTRegister:
             otp_deadline = time.time() + 120
 
             while time.time() < otp_deadline and not otp_success:
-                if MAIL_PROVIDER == "tempmail":
+                messages = []
+                if MAIL_PROVIDER == "cf_worker":
+                    candidate_codes = []
+                    try:
+                        worker_base = CF_WORKER_URL.rstrip("/")
+                        resp = self.session.get(
+                            f"{worker_base}/get-otp",
+                            params={"email": mail_token},
+                            timeout=12,
+                            impersonate=self.impersonate,
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            otp = (data or {}).get("otp")
+                            if otp:
+                                otp = str(otp).strip()
+                                if re.fullmatch(r"\d{6}", otp) and otp not in tried_codes:
+                                    candidate_codes.append(otp)
+                    except Exception:
+                        pass
+                elif MAIL_PROVIDER == "tempmail":
                     messages = self._fetch_emails_tempmail(mail_token) or []
+                    candidate_codes = []
                 else:
                     messages = self._fetch_emails_duckmail(mail_token) or []
-                candidate_codes = []
+                    candidate_codes = []
 
-                for msg in messages[:12]:
-                    if MAIL_PROVIDER == "tempmail":
-                        # temp-mail 返回 raw 字段（完整 MIME 原始报文）
-                        content = (msg.get("raw") or msg.get("text") or msg.get("html")
-                                   or msg.get("body") or msg.get("content") or "")
-                    else:
-                        content = (msg.get("text") or msg.get("html")
-                                   or msg.get("body") or msg.get("content") or "")
-                        if not content:
-                            msg_id = msg.get("id") or msg.get("@id")
-                            if not msg_id:
-                                continue
-                            detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
-                            if not detail:
-                                continue
-                            content = detail.get("text") or detail.get("html") or ""
-                    code = self._extract_verification_code(content)
-                    if code and code not in tried_codes:
-                        candidate_codes.append(code)
+                if MAIL_PROVIDER != "cf_worker":
+                    for msg in messages[:12]:
+                        if MAIL_PROVIDER == "tempmail":
+                            # temp-mail 返回 raw 字段（完整 MIME 原始报文）
+                            content = (msg.get("raw") or msg.get("text") or msg.get("html")
+                                       or msg.get("body") or msg.get("content") or "")
+                        else:
+                            content = (msg.get("text") or msg.get("html")
+                                       or msg.get("body") or msg.get("content") or "")
+                            if not content:
+                                msg_id = msg.get("id") or msg.get("@id")
+                                if not msg_id:
+                                    continue
+                                detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
+                                if not detail:
+                                    continue
+                                content = detail.get("text") or detail.get("html") or ""
+                        code = self._extract_verification_code(content)
+                        if code and code not in tried_codes:
+                            candidate_codes.append(code)
 
                 if not candidate_codes:
                     elapsed = int(120 - max(0, otp_deadline - time.time()))
@@ -1837,7 +1916,16 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
               max_workers=3, proxy=None):
     """并发批量注册"""
 
-    if MAIL_PROVIDER == "tempmail":
+    if MAIL_PROVIDER == "cf_worker":
+        if not CF_WORKER_URL:
+            print("❌ 错误: 未设置 CF_WORKER_URL 环境变量")
+            print("   请设置: export CF_WORKER_URL='https://xxx.workers.dev'")
+            return
+        if not TEMPMAIL_DOMAIN:
+            print("❌ 错误: 未设置 TEMPMAIL_DOMAIN 环境变量")
+            print("   请设置: export TEMPMAIL_DOMAIN='your-domain.com'")
+            return
+    elif MAIL_PROVIDER == "tempmail":
         if not TEMPMAIL_ADMIN_AUTH:
             print("❌ 错误: 未设置 TEMPMAIL_ADMIN_AUTH 环境变量")
             print("   请设置: export TEMPMAIL_ADMIN_AUTH='your_admin_password'")
@@ -1853,7 +1941,9 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     print(f"  ChatGPT 批量自动注册")
     print(f"  邮件提供商: {MAIL_PROVIDER.upper()}")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
-    if MAIL_PROVIDER == "tempmail":
+    if MAIL_PROVIDER == "cf_worker":
+        print(f"  CF Worker: {CF_WORKER_URL} | 域名: {TEMPMAIL_DOMAIN}")
+    elif MAIL_PROVIDER == "tempmail":
         print(f"  temp-mail: {TEMPMAIL_API_BASE} | 域名: {TEMPMAIL_DOMAIN}")
     else:
         print(f"  DuckMail: {DUCKMAIL_API_BASE}")
@@ -1909,7 +1999,19 @@ def main():
     print("=" * 60)
 
     # 检查邮件提供商配置
-    if MAIL_PROVIDER == "tempmail":
+    if MAIL_PROVIDER == "cf_worker":
+        if not CF_WORKER_URL:
+            print("\n⚠️  警告: 未设置 CF_WORKER_URL")
+            print("   请编辑 config.json 设置 cf_worker_url，或设置环境变量:")
+            print("   Linux/Mac: export CF_WORKER_URL='https://xxx.workers.dev'")
+            print("\n   按 Enter 继续尝试运行 (可能会失败)...")
+            input()
+        if not TEMPMAIL_DOMAIN:
+            print("\n⚠️  警告: 未设置 TEMPMAIL_DOMAIN")
+            print("   请设置用于注册邮箱后缀的域名，例如 aisuper.win")
+            print("\n   按 Enter 继续尝试运行 (可能会失败)...")
+            input()
+    elif MAIL_PROVIDER == "tempmail":
         if not TEMPMAIL_ADMIN_AUTH:
             print("\n⚠️  警告: 未设置 TEMPMAIL_ADMIN_AUTH")
             print("   请编辑 config.json 设置 tempmail_admin_auth，或设置环境变量:")

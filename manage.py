@@ -114,6 +114,8 @@ def cmd_register(args: argparse.Namespace) -> int:
     capsolver = cfg.get("capsolver", {})
 
     domain = args.domain or (mail.get("domains", [""])[0] if mail.get("domains") else "")
+    os.environ["MAIL_PROVIDER"] = str(mail.get("provider", "duckmail"))
+    os.environ["CF_WORKER_URL"] = str(mail.get("cf_worker_url", ""))
     os.environ["TEMPMAIL_DOMAIN"] = domain
     os.environ["PROXY"] = proxy.get("http", "")
     os.environ.setdefault("CAPSOLVER_API_KEY", capsolver.get("api_key", ""))
